@@ -53,6 +53,16 @@ ITEM_TEXT, ITEM_IMAGE, ITEM_VOICE, ITEM_FILE, ITEM_VIDEO = 1, 2, 3, 4, 5
 # getuploadurl 的 media_type（与 item 类型编号不同）
 UPLOAD_IMAGE, UPLOAD_VIDEO, UPLOAD_FILE, UPLOAD_VOICE = 1, 2, 3, 4
 MAX_MEDIA_BYTES = 100 << 20  # 100 MB
+MAX_TEXT_RUNES = 2000  # 微信单条文本上限（按字符计）
+
+
+def split_text(text, max_runes=MAX_TEXT_RUNES):
+    """超长文本按 max_runes 切分（学 wx-bot 的 SplitText）。"""
+    if max_runes <= 0:
+        max_runes = MAX_TEXT_RUNES
+    if len(text) <= max_runes:
+        return [text]
+    return [text[i:i + max_runes] for i in range(0, len(text), max_runes)]
 
 for _d in (STATE_DIR, INBOX_DIR, PENDING_DIR, SENT_DIR, MEDIA_DIR):
     os.makedirs(_d, exist_ok=True)
@@ -449,7 +459,11 @@ def media_type_from_path(path):
 
 # ---------- login ----------
 
-def cmd_login(args):
+QR_MAX_REFRESH = 3  # 二维码过期自动刷新次数（学 wx-bot）
+
+
+def fetch_qrcode():
+    """请求新的登录二维码，返回 (qrcode, img_content)，失败返回 (None, None)。"""
     url = DEFAULT_API + "/ilink/bot/get_bot_qrcode?bot_type=3"
     headers = {
         "Content-Type": "application/json",
@@ -464,7 +478,7 @@ def cmd_login(args):
     img_content = resp.get("qrcode_img_content")
     if not qrcode or not img_content:
         print("获取二维码失败: %s" % json.dumps(resp, ensure_ascii=False)[:500])
-        return 1
+        return None, None
     atomic_write_json(QR_PATH, {
         "qrcode": qrcode,
         "qrcode_img_content": img_content,
@@ -474,6 +488,13 @@ def cmd_login(args):
     import qrcode as qr_lib
     img = qr_lib.make(img_content)
     img.save(QR_IMG_PATH)
+    return qrcode, img_content
+
+
+def cmd_login(args):
+    qrcode, _ = fetch_qrcode()
+    if not qrcode:
+        return 1
     print("二维码图片已保存: %s" % QR_IMG_PATH)
     print("请用手机微信扫码，扫完后运行: python3 bridge.py wait-login")
     return 0
@@ -488,8 +509,9 @@ def cmd_wait_login(args):
         return 1
     qrcode = qr["qrcode"]
     api = qr.get("api") or DEFAULT_API
+    refresh_left = QR_MAX_REFRESH
     deadline = time.time() + 600  # 最长等 10 分钟
-    print("等待扫码确认（最长 10 分钟）…")
+    print("等待扫码确认（最长 10 分钟，二维码过期自动刷新 %d 次）…" % QR_MAX_REFRESH)
     while time.time() < deadline:
         url = api + "/ilink/bot/get_qrcode_status?qrcode=" + urllib.parse.quote(qrcode, safe="")
         try:
@@ -498,6 +520,17 @@ def cmd_wait_login(args):
         except Exception as e:
             print("轮询出错，2 秒后重试: %s" % e)
             time.sleep(2)
+            continue
+        status = resp.get("status")
+        if status == "expired" and refresh_left > 0:
+            # 二维码过期：自动刷新（学 wx-bot，最多 QR_MAX_REFRESH 次）
+            refresh_left -= 1
+            print("二维码已过期，自动刷新（剩余 %d 次）…" % refresh_left)
+            qrcode, _ = fetch_qrcode()
+            if not qrcode:
+                print("刷新二维码失败。")
+                return 1
+            print("新二维码已生成: %s，请重新扫码" % QR_IMG_PATH)
             continue
         status = resp.get("status")
         if status == "wait":
@@ -529,7 +562,7 @@ def cmd_wait_login(args):
             print("登录成功，会话已保存到 state/session.json（bot_token 已脱敏存放）。")
             return 0
         elif status == "expired":
-            print("二维码已过期，请重新运行 login 获取新码。")
+            print("二维码已过期且刷新次数用完，请重新运行 login 获取新码。")
             return 1
         elif status == "need_verifycode":
             print("手机上显示了验证码，需要输入验证码才能继续；请重新运行 login 并按手机提示操作。")
@@ -640,20 +673,26 @@ def handle_incoming(msg, owner_id):
 
 
 def send_message(baseurl, token, to_user_id, text, context_token):
-    payload = {
-        "msg": {
-            "from_user_id": "",          # 必须空字符串，否则发不出去还不报错
-            "to_user_id": to_user_id,
-            "client_id": uuid.uuid4().hex,  # 每次随机唯一
-            "message_type": 2,
-            "message_state": 2,
-            "context_token": context_token or "",  # 原样回传用户那条消息里的值
-            "item_list": [{"type": 1, "text_item": {"text": text}}],
-        },
-        "base_info": base_info(),        # 顶层必须带 base_info
-    }
-    return http_json("POST", baseurl + "/ilink/bot/sendmessage",
-                     auth_headers(token), payload, timeout=30)
+    """发文本。超 2000 字自动分片多条发出，返回最后一条的响应。"""
+    last_resp = {}
+    for chunk in split_text(text):
+        payload = {
+            "msg": {
+                "from_user_id": "",          # 必须空字符串，否则发不出去还不报错
+                "to_user_id": to_user_id,
+                "client_id": uuid.uuid4().hex,  # 每次随机唯一
+                "message_type": 2,
+                "message_state": 2,
+                "context_token": context_token or "",  # 原样回传用户那条消息里的值
+                "item_list": [{"type": 1, "text_item": {"text": chunk}}],
+            },
+            "base_info": base_info(),        # 顶层必须带 base_info
+        }
+        last_resp = http_json("POST", baseurl + "/ilink/bot/sendmessage",
+                              auth_headers(token), payload, timeout=30)
+        if is_token_invalid(last_resp):
+            break
+    return last_resp
 
 
 def flush_outbox(baseurl, token):
@@ -718,6 +757,8 @@ def cmd_serve(args):
         with open(BUF_PATH, encoding="utf-8") as f:
             buf = f.read().strip()
     print("serve 启动，监听用户 %s 的消息…" % owner_id, flush=True)
+    consec_failures = 0  # 连续失败计数，用于指数退避
+    poll_timeout = 45
     try:
         while True:
             if os.path.exists(NEEDS_RELOGIN_PATH):
@@ -726,11 +767,23 @@ def cmd_serve(args):
             url = baseurl + "/ilink/bot/getupdates"
             body = {"get_updates_buf": buf, "base_info": base_info()}
             try:
-                resp = http_json("POST", url, auth_headers(token), body, timeout=45)
+                resp = http_json("POST", url, auth_headers(token), body, timeout=poll_timeout)
             except Exception as e:
-                print("getupdates 出错，5 秒后重试: %s" % e, flush=True)
-                time.sleep(5)
+                consec_failures += 1
+                # 学 wx-bot：2 秒重试，连续 3 次失败后退避到 30 秒
+                delay = 30 if consec_failures >= 3 else 2
+                print("getupdates 出错，%d 秒后重试 (连续失败 %d 次): %s"
+                      % (delay, consec_failures, e), flush=True)
+                time.sleep(delay)
                 continue
+            consec_failures = 0
+            # 服务端可下发建议的长轮询窗口
+            try:
+                suggested = int(resp.get("longpolling_timeout_ms") or 0)
+                if suggested > 0:
+                    poll_timeout = min(suggested // 1000 + 10, 120)
+            except (TypeError, ValueError):
+                pass
             if not isinstance(resp, dict):
                 resp = {}
             if is_token_invalid(resp):
