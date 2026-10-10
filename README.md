@@ -4,7 +4,7 @@
   <img src="docs/assets/logo.webp" width="120" alt="wechat-bridge logo"/>
 </p>
 
-**把微信接到你的个人 AI 助手（Muse 等）。**
+                                       **把微信接到你的个人 AI 助手（Muse 等）。**
 
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8+-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![Linux](https://img.shields.io/badge/Linux-supported-FCC624?style=flat-square&logo=linux&logoColor=black)](https://github.com/Liu-zhongxian/wechat-bridge)
@@ -31,7 +31,7 @@
 |        | -------------------> |              | --------------> |         |
 | WeChat |                      | wechat-bridge|                 |  Agent  |
 |        | <------------------- |              | <-------------- |         |
-+--------+   iLink sendmessage  +--------------+  outbox/pending +
++--------+   iLink sendmessage  +--------------+  outbox/pending +---------+ 
 ```
 
 ## 架构
