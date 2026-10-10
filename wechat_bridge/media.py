@@ -156,17 +156,23 @@ def upload_media(baseurl, token, to_user_id, data, item_type):
 
 def send_media_message(baseurl, token, to_user_id, context_token, file_path,
                        item_type, caption=""):
-    """发图片/视频/文件到微信。caption 会作为单独的文本消息先发。"""
+    """发图片/视频/文件到微信。caption 会作为单独的文本消息先发。
+
+    注意顺序：先上传到 CDN（易失败，无用户可见副作用），上传成功后再发
+    配文和媒体消息。这样上传失败重试时不会重复发送配文。
+    """
     with open(file_path, "rb") as f:
         data = f.read()
     if len(data) > MAX_MEDIA_BYTES:
         raise ValueError("文件超过 100MB 上限")
+    # 1. 先上传（失败可安全重试，用户看不到）
+    download_param, aes_key_b64, cipher_size = upload_media(
+        baseurl, token, to_user_id, data, item_type)
+    # 2. 上传成功后，再发配文和媒体消息（sendmessage 可靠）
     if caption:
         r = send_message(baseurl, token, to_user_id, caption, context_token)
         if is_token_invalid(r):
             return r
-    download_param, aes_key_b64, cipher_size = upload_media(
-        baseurl, token, to_user_id, data, item_type)
     media_ref = {"encrypt_query_param": download_param,
                  "aes_key": aes_key_b64, "encrypt_type": 1}
     if item_type == ITEM_IMAGE:
