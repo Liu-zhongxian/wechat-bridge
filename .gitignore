@@ -1,0 +1,6 @@
+state/
+inbox/
+outbox/
+media/
+*.log
+__pycache__/
