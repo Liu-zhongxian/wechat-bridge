@@ -33,17 +33,29 @@ class Store:
 
 
 def atomic_write_json(path, obj):
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+    _atomic_write(path, lambda f: json.dump(obj, f, ensure_ascii=False, indent=2))
 
 
 def atomic_write_text(path, text):
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(text)
-    os.replace(tmp, path)
+    _atomic_write(path, lambda f: f.write(text))
+
+
+def _atomic_write(path, writer):
+    """原子写入：先写唯一临时文件再替换，避免 tmp 不存在或并发冲突导致崩溃。"""
+    import tempfile
+    d = os.path.dirname(os.path.abspath(path))
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            writer(f)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def load_json(path, default=None):
